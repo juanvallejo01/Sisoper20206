@@ -5,6 +5,11 @@
 #define PARTITIONS 4
 #define PART_SYZE (MEMORY_SYZE / PARTITIONS) /* Tamaño de cada partición */
 
+#define BEST_FIT 1
+#define WORST_FIT 2
+
+int allocation_method = BEST_FIT;  // Método por defecto
+
 typedef struct
 {
     int process_id;
@@ -51,21 +56,62 @@ void allocate_mem(int pid, int size)
             pid, size, PART_SYZE);
         return;
     }
-    
-    for(int i = 0; i < PARTITIONS; i++)
+
+    int index = -1;
+
+    if(allocation_method == BEST_FIT)
     {
-        if(!memory[i].occupied)
+        int minWaste = PART_SYZE + 1;
+
+        for(int i = 0; i < PARTITIONS; i++)
         {
-            memory[i].process_id = pid;
-            memory[i].size = size;
-            memory[i].occupied = true;
-            printf("Proceso %d asignado a la particion %d (%d bytes)\n", pid, i, size);
-            return;
+            if(!memory[i].occupied)
+            {
+                int waste = PART_SYZE - size;
+
+                if(waste < minWaste)
+                {
+                    minWaste = waste;
+                    index = i;
+                }
+            }
         }
+
+        if(index != -1)
+            printf("Proceso %d asignado a la particion %d usando BEST FIT\n", pid, index);
     }
-    
-    /* No hay particiones libres */
-    printf("\nError: No hay particiones libres para el proceso %d.\n", pid);
+    else if(allocation_method == WORST_FIT)
+    {
+        int maxWaste = -1;
+
+        for(int i = 0; i < PARTITIONS; i++)
+        {
+            if(!memory[i].occupied)
+            {
+                int waste = PART_SYZE - size;
+
+                if(waste > maxWaste)
+                {
+                    maxWaste = waste;
+                    index = i;
+                }
+            }
+        }
+
+        if(index != -1)
+            printf("Proceso %d asignado a la particion %d usando WORST FIT\n", pid, index);
+    }
+
+    if(index != -1)
+    {
+        memory[index].process_id = pid;
+        memory[index].size = size;
+        memory[index].occupied = true;
+    }
+    else
+    {
+        printf("\nError: No hay particiones libres para el proceso %d.\n", pid);
+    }
 }
 
 void free_mem(int pid)
@@ -97,10 +143,16 @@ int main()
     print_mem();
     
     // ALOJAMOS 3 PROCESOS
-    printf("\n2. Asignando 3 procesos...\n");
-    allocate_mem(101, 200);  // Proceso 101, 200 bytes
-    allocate_mem(102, 150);  // Proceso 102, 150 bytes
-    allocate_mem(103, 250);  // Proceso 103, 250 bytes
+    printf("\n2. Asignando 3 procesos...\n");printf("\n2. Asignando 3 procesos...\n");
+
+    allocation_method = BEST_FIT;
+    allocate_mem(101, 200);
+
+    allocation_method = WORST_FIT;
+    allocate_mem(102, 150);
+
+    allocation_method = BEST_FIT;
+    allocate_mem(103, 250);
     
     // IMPRIMIMOS
     printf("\n3. Estado despues de asignar procesos:\n");
@@ -123,6 +175,8 @@ int main()
     
     printf("\n8. Estado final:\n");
     print_mem();
+
+    
     
     return 0;
 }
