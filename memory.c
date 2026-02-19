@@ -42,7 +42,7 @@ void print_mem()
     }
     printf("=======================================\n");
 }
-
+//usa worst fit y best fit para asignar memoria a los procesos
 void allocate_mem(int pid, int size)
 {
     if(size > PART_SYZE)
