@@ -1,13 +1,15 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-#define MEMORY_SYZE 1024
-#define PARTITIONS 4
-#define PART_SYZE (MEMORY_SYZE / PARTITIONS) /* Tamaño de cada partición */
+/* ============================================================
+   CONFIGURACIÓN GENERAL
+   ============================================================ */
+#define MEMORY_SIZE 1024
+#define MAX_BLOCKS  64   /* máximo de bloques dinámicos posibles */
 
 typedef struct
 {
-    int  process_id;  /* -1 si esta libre */
+    int  process_id;   /* -1 si está libre */
     int  size;
     bool occupied;
 } Block;
@@ -15,7 +17,10 @@ typedef struct
 Block memory[MAX_BLOCKS];
 int   block_count = 0;
 
-/* ================== INICIALIZAR ================== */
+
+/* ============================================================
+   INICIALIZAR
+   ============================================================ */
 void initialize_memory()
 {
     memory[0].process_id = -1;
@@ -24,23 +29,29 @@ void initialize_memory()
     block_count          = 1;
 }
 
-/* ================== IMPRIMIR ================== */
+
+/* ============================================================
+   IMPRIMIR
+   ============================================================ */
 void print_memory()
 {
     printf("\n======= ESTADO DE MEMORIA =======\n");
     for (int i = 0; i < block_count; i++)
     {
         if (memory[i].occupied)
-            printf("Bloque %d: Proceso %d (%d bytes)\n",
+            printf("  Bloque %d: Proceso %d  (%d bytes)\n",
                    i, memory[i].process_id, memory[i].size);
         else
-            printf("Bloque %d: LIBRE (%d bytes)\n",
+            printf("  Bloque %d: LIBRE       (%d bytes)\n",
                    i, memory[i].size);
     }
     printf("=================================\n");
 }
 
-/* ================== FUSIONAR BLOQUES LIBRES ================== */
+
+/* ============================================================
+   FUSIONAR BLOQUES LIBRES CONTIGUOS  (coalescencia)
+   ============================================================ */
 void merge_free_blocks()
 {
     for (int i = 0; i < block_count - 1; i++)
@@ -49,24 +60,29 @@ void merge_free_blocks()
         {
             memory[i].size += memory[i + 1].size;
 
+            /* desplazar todos los bloques posteriores una posición */
             for (int k = i + 1; k < block_count - 1; k++)
                 memory[k] = memory[k + 1];
 
             block_count--;
-            i--;
+            i--;   /* revisar el mismo índice de nuevo */
         }
     }
 }
 
-/* ================== DIVIDIR BLOQUE ================== */
+
+/* ============================================================
+   DIVIDIR BLOQUE  (particionamiento dinámico)
+   ============================================================ */
 void split_block(int index, int size)
 {
     int remaining = memory[index].size - size;
 
-    memory[index].size = size;
+    memory[index].size = size;   /* ajustar bloque asignado */
 
     if (remaining > 0 && block_count < MAX_BLOCKS)
     {
+        /* hacer hueco desplazando bloques a la derecha */
         for (int j = block_count; j > index + 1; j--)
             memory[j] = memory[j - 1];
 
@@ -78,7 +94,10 @@ void split_block(int index, int size)
     }
 }
 
-/* ================== BEST FIT ================== */
+
+/* ============================================================
+   BEST FIT  — asigna el bloque libre más pequeño que alcance
+   ============================================================ */
 void allocate_best_fit(int pid, int size)
 {
     int best_index = -1;
@@ -102,24 +121,56 @@ void allocate_best_fit(int pid, int size)
         printf("BEST FIT: Sin espacio para proceso %d (%d bytes).\n", pid, size);
         return;
     }
-    
-    for(int i = 0; i < PARTITIONS; i++)
-    {
-        if(!memory[i].occupied)
-        {
-            memory[i].process_id = pid;
-            memory[i].size = size;
-            memory[i].occupied = true;
-            printf("Proceso %d asignado a la particion %d (%d bytes)\n", pid, i, size);
-            return;
-        }
-    }
-    
-    /* No hay particiones libres */
-    printf("\nError: No hay particiones libres para el proceso %d.\n", pid);
+
+    split_block(best_index, size);          /* <-- particionamiento dinámico */
+
+    memory[best_index].process_id = pid;
+    memory[best_index].occupied   = true;
+
+    printf("BEST FIT: Proceso %d asignado al bloque %d (%d bytes).\n",
+           pid, best_index, size);
 }
 
-/* ================== LIBERAR ================== */
+
+/* ============================================================
+   WORST FIT  — asigna el bloque libre más grande disponible
+   ============================================================ */
+void allocate_worst_fit(int pid, int size)
+{
+    int worst_index = -1;
+    int max_size    = -1;
+
+    for (int i = 0; i < block_count; i++)
+    {
+        if (!memory[i].occupied && memory[i].size >= size)
+        {
+            if (memory[i].size > max_size)
+            {
+                max_size    = memory[i].size;
+                worst_index = i;
+            }
+        }
+    }
+
+    if (worst_index == -1)
+    {
+        printf("WORST FIT: Sin espacio para proceso %d (%d bytes).\n", pid, size);
+        return;
+    }
+
+    split_block(worst_index, size);         /* <-- particionamiento dinámico */
+
+    memory[worst_index].process_id = pid;
+    memory[worst_index].occupied   = true;
+
+    printf("WORST FIT: Proceso %d asignado al bloque %d (%d bytes).\n",
+           pid, worst_index, size);
+}
+
+
+/* ============================================================
+   LIBERAR PROCESO
+   ============================================================ */
 void free_memory(int pid)
 {
     for (int i = 0; i < block_count; i++)
@@ -129,7 +180,7 @@ void free_memory(int pid)
             printf("Liberando proceso %d del bloque %d.\n", pid, i);
             memory[i].process_id = -1;
             memory[i].occupied   = false;
-            merge_free_blocks();
+            merge_free_blocks();   /* coalescencia tras liberar */
             return;
         }
     }
@@ -137,46 +188,65 @@ void free_memory(int pid)
     printf("Error: proceso %d no encontrado.\n", pid);
 }
 
-/* ================== MAIN ================== */
+
+/* ============================================================
+   MAIN
+   ============================================================ */
 int main()
 {
-    printf("====== SIMULADOR DE PARTICIONES FIJAS ======\n");
-    printf("Memoria total: %d bytes\n", MEMORY_SYZE);
-    printf("Numero de particiones: %d\n", PARTITIONS);
-    printf("Tamaño de cada particion: %d bytes\n\n", PART_SYZE);
-    
-    // INICIALIZAMOS
-    printf("1. Inicializando memoria...\n");
-    initalize_mem();
-    print_mem();
-    
-    // ALOJAMOS 3 PROCESOS
-    printf("\n2. Asignando 3 procesos...\n");
-    allocate_mem(101, 200);  // Proceso 101, 200 bytes
-    allocate_mem(102, 150);  // Proceso 102, 150 bytes
-    allocate_mem(103, 250);  // Proceso 103, 250 bytes
-    
-    // IMPRIMIMOS
-    printf("\n3. Estado despues de asignar procesos:\n");
-    print_mem();
-    
-    // LIBERAMOS UN PROCESO
-    printf("\n4. Liberando proceso 102...\n");
-    free_mem(102);
-    
-    // IMPRIMIMOS DE NUEVO
-    printf("\n5. Estado despues de liberar proceso:\n");
-    print_mem();
-    
-    // PRUEBAS ADICIONALES
-    printf("\n6. Intentando asignar un proceso muy grande...\n");
-    allocate_mem(104, 300);  // Excede el tamaño de partición
-    
-    printf("\n7. Asignando proceso en particion liberada...\n");
-    allocate_mem(105, 180);  // Debería ocupar la partición liberada
-    
-    printf("\n8. Estado final:\n");
-    print_mem();
-    
+    printf("====== SIMULADOR DE PARTICIONAMIENTO DINAMICO ======\n");
+    printf("Memoria total: %d bytes | Max bloques: %d\n\n",
+           MEMORY_SIZE, MAX_BLOCKS);
+
+    /* ---------- BEST FIT demo ---------- */
+    printf("===== PRUEBA: BEST FIT =====\n");
+    initialize_memory();
+
+    printf("\n1. Memoria inicial:\n");
+    print_memory();
+
+    printf("\n2. Asignando procesos con Best Fit...\n");
+    allocate_best_fit(101, 200);
+    allocate_best_fit(102, 150);
+    allocate_best_fit(103, 250);
+    print_memory();
+
+    printf("\n3. Liberando proceso 102...\n");
+    free_memory(102);
+    print_memory();
+
+    printf("\n4. Asignando proceso 104 (100 bytes) — debe usar el hueco exacto mas pequeño...\n");
+    allocate_best_fit(104, 100);
+    print_memory();
+
+    printf("\n5. Intentando asignar proceso muy grande (900 bytes)...\n");
+    allocate_best_fit(105, 900);
+    print_memory();
+
+    /* ---------- WORST FIT demo ---------- */
+    printf("\n\n===== PRUEBA: WORST FIT =====\n");
+    initialize_memory();
+
+    printf("\n1. Memoria inicial:\n");
+    print_memory();
+
+    printf("\n2. Asignando procesos con Worst Fit...\n");
+    allocate_worst_fit(201, 200);
+    allocate_worst_fit(202, 150);
+    allocate_worst_fit(203, 250);
+    print_memory();
+
+    printf("\n3. Liberando proceso 202...\n");
+    free_memory(202);
+    print_memory();
+
+    printf("\n4. Asignando proceso 204 (100 bytes) — debe usar el bloque libre mas grande...\n");
+    allocate_worst_fit(204, 100);
+    print_memory();
+
+    printf("\n5. Intentando asignar proceso muy grande (900 bytes)...\n");
+    allocate_worst_fit(205, 900);
+    print_memory();
+
     return 0;
 }
