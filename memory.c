@@ -170,3 +170,166 @@ void free_memory(int pid)
     }
     printf("Error: proceso %d no encontrado.\n", pid);
 }
+/* ============================================================
+   ========================  PAGINACIÓN  ======================
+   ============================================================ */
+
+/* Inicializa todos los marcos como libres */
+void initialize_paging()
+{
+    for (int i = 0; i < TOTAL_FRAMES; i++)
+        frames[i] = false;
+    page_process_count = 0;
+    printf("Paginación inicializada: %d marcos de %d bytes cada uno.\n",
+           TOTAL_FRAMES, PAGE_SIZE);
+}
+
+/* Muestra el estado de cada marco físico */
+void print_frames()
+{
+    printf("\n======= ESTADO DE MARCOS (Paginación) =======\n");
+    printf("  Tamaño de página/marco: %d bytes\n", PAGE_SIZE);
+    printf("  Marcos totales: %d\n\n", TOTAL_FRAMES);
+
+    for (int i = 0; i < TOTAL_FRAMES; i++)
+    {
+        if (frames[i])
+            printf("  Marco %2d: OCUPADO\n", i);
+        else
+            printf("  Marco %2d: libre\n", i);
+    }
+    printf("=============================================\n");
+}
+
+/* Muestra la tabla de páginas de todos los procesos */
+void print_page_tables()
+{
+    printf("\n======= TABLAS DE PÁGINAS =======\n");
+    if (page_process_count == 0)
+    {
+        printf("  (sin procesos paginados)\n");
+    }
+    for (int i = 0; i < page_process_count; i++)
+    {
+        printf("  Proceso %d (%d páginas):\n",
+               page_processes[i].process_id,
+               page_processes[i].page_count);
+
+        for (int p = 0; p < page_processes[i].page_count; p++)
+            printf("    Página %d → Marco %d  (dir. física: %d)\n",
+                   p,
+                   page_processes[i].page_table[p],
+                   page_processes[i].page_table[p] * PAGE_SIZE);
+    }
+    printf("=================================\n");
+}
+
+/* Asigna páginas a un proceso según su tamaño */
+void allocate_pages(int pid, int size)
+{
+    /* calcular cuántas páginas necesita (redondeo hacia arriba) */
+    int pages_needed = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    if (page_process_count >= MAX_PROCESS)
+    {
+        printf("PAGINACIÓN: Límite de procesos alcanzado.\n");
+        return;
+    }
+
+    if (pages_needed > MAX_PAGES)
+    {
+        printf("PAGINACIÓN: Proceso %d necesita %d páginas, supera MAX_PAGES=%d.\n",
+               pid, pages_needed, MAX_PAGES);
+        return;
+    }
+
+    /* contar marcos libres disponibles */
+    int free_frames = 0;
+    for (int i = 0; i < TOTAL_FRAMES; i++)
+        if (!frames[i]) free_frames++;
+
+    if (free_frames < pages_needed)
+    {
+        printf("PAGINACIÓN: Sin marcos suficientes para proceso %d "
+               "(necesita %d, hay %d libres).\n",
+               pid, pages_needed, free_frames);
+        return;
+    }
+
+    /* registrar proceso en la tabla */
+    PageTableEntry *entry = &page_processes[page_process_count];
+    entry->process_id = pid;
+    entry->page_count = pages_needed;
+
+    /* asignar marcos libres uno a uno */
+    int assigned = 0;
+    for (int i = 0; i < TOTAL_FRAMES && assigned < pages_needed; i++)
+    {
+        if (!frames[i])
+        {
+            frames[i]                  = true;
+            entry->page_table[assigned] = i;
+            assigned++;
+        }
+    }
+
+    page_process_count++;
+
+    int wasted = (pages_needed * PAGE_SIZE) - size;  /* fragmentación interna */
+    printf("PAGINACIÓN: Proceso %d asignado → %d página(s), "
+           "%d bytes usados, %d bytes desperdiciados (frag. interna).\n",
+           pid, pages_needed, size, wasted);
+}
+
+/* Libera todos los marcos de un proceso paginado */
+void free_pages(int pid)
+{
+    for (int i = 0; i < page_process_count; i++)
+    {
+        if (page_processes[i].process_id == pid)
+        {
+            printf("PAGINACIÓN: Liberando proceso %d (%d marcos).\n",
+                   pid, page_processes[i].page_count);
+
+            /* liberar cada marco */
+            for (int p = 0; p < page_processes[i].page_count; p++)
+                frames[page_processes[i].page_table[p]] = false;
+
+            /* eliminar entrada de la tabla compactando */
+            for (int k = i; k < page_process_count - 1; k++)
+                page_processes[k] = page_processes[k + 1];
+
+            page_process_count--;
+            return;
+        }
+    }
+    printf("PAGINACIÓN: Proceso %d no encontrado.\n", pid);
+}
+
+/* Traduce dirección lógica → dirección física */
+void translate_address(int pid, int logical_address)
+{
+    int page   = logical_address / PAGE_SIZE;   /* número de página  */
+    int offset = logical_address % PAGE_SIZE;   /* desplazamiento    */
+
+    for (int i = 0; i < page_process_count; i++)
+    {
+        if (page_processes[i].process_id == pid)
+        {
+            if (page >= page_processes[i].page_count)
+            {
+                printf("TRADUCCIÓN: Dirección lógica %d fuera de rango "
+                       "(proceso %d tiene %d páginas).\n",
+                       logical_address, pid, page_processes[i].page_count);
+                return;
+            }
+            int frame    = page_processes[i].page_table[page];
+            int physical = frame * PAGE_SIZE + offset;
+            printf("TRADUCCIÓN: Proceso %d | Dir. lógica %d → "
+                   "Página %d + Offset %d → Marco %d → Dir. física %d\n",
+                   pid, logical_address, page, offset, frame, physical);
+            return;
+        }
+    }
+    printf("TRADUCCIÓN: Proceso %d no encontrado.\n", pid);
+}
