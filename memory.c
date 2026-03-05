@@ -333,3 +333,73 @@ void translate_address(int pid, int logical_address)
     }
     printf("TRADUCCIÓN: Proceso %d no encontrado.\n", pid);
 }
+
+/* ============================================================
+   MAIN
+   ============================================================ */
+int main()
+{
+    /* -------- PARTICIONAMIENTO DINÁMICO -------- */
+    printf("====== SIMULADOR DE PARTICIONAMIENTO DINAMICO ======\n");
+    printf("Memoria total: %d bytes | Max bloques: %d\n\n", MEMORY_SIZE, MAX_BLOCKS);
+
+    printf("===== PRUEBA: BEST FIT =====\n");
+    initialize_memory();
+    print_memory();
+
+    printf("\nAsignando procesos...\n");
+    allocate_best_fit(101, 200);
+    allocate_best_fit(102, 150);
+    allocate_best_fit(103, 250);
+    print_memory();
+
+    printf("\nLiberando proceso 102...\n");
+    free_memory(102);
+    allocate_best_fit(104, 100);
+    print_memory();
+
+    printf("\n===== PRUEBA: WORST FIT =====\n");
+    initialize_memory();
+    allocate_worst_fit(201, 200);
+    allocate_worst_fit(202, 150);
+    allocate_worst_fit(203, 250);
+    print_memory();
+
+    printf("\nLiberando proceso 202...\n");
+    free_memory(202);
+    allocate_worst_fit(204, 100);
+    print_memory();
+
+    /* -------- PAGINACIÓN -------- */
+    printf("\n\n====== SIMULADOR DE PAGINACIÓN ======\n");
+    printf("Tamaño de página: %d bytes | Marcos totales: %d\n\n",
+           PAGE_SIZE, TOTAL_FRAMES);
+
+    initialize_paging();
+    print_frames();
+
+    printf("\n1. Asignando procesos paginados...\n");
+    allocate_pages(301, 100);   /* necesita 2 páginas  (100/64 → ceil = 2) */
+    allocate_pages(302, 200);   /* necesita 4 páginas  (200/64 → ceil = 4) */
+    allocate_pages(303, 64);    /* necesita 1 página exacta                */
+
+    print_frames();
+    print_page_tables();
+
+    printf("\n2. Traducción de direcciones lógicas...\n");
+    translate_address(301, 0);    /* página 0, offset 0  */
+    translate_address(301, 70);   /* página 1, offset 6  */
+    translate_address(302, 130);  /* página 2, offset 2  */
+
+    printf("\n3. Liberando proceso 302...\n");
+    free_pages(302);
+    print_frames();
+    print_page_tables();
+
+    printf("\n4. Asignando nuevo proceso en marcos liberados...\n");
+    allocate_pages(304, 180);
+    print_frames();
+    print_page_tables();
+
+    return 0;
+}
