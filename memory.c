@@ -1,405 +1,412 @@
+/* memory.c (ANSI C89) - Estático/Dinámico (Best/Worst) + VM (Paginación + Segmentación bonus)
+   Compilar: gcc -std=c89 -Wall -Wextra -pedantic memory.c -o memory
+*/
 #include <stdio.h>
 #include <stdbool.h>
 
-/* ============================================================
-   CONFIGURACIÓN GENERAL
-   ============================================================ */
-#define MEMORY_SIZE  1024
-#define MAX_BLOCKS   64
+/* ---- Config ---- */
+#define MEM_SIZE 1024
+#define MAX_BLK  64
 
-/* ============================================================
-   CONFIGURACIÓN DE PAGINACIÓN
-   ============================================================ */
-#define PAGE_SIZE    64          /* tamaño de cada página/marco en bytes  */
-#define TOTAL_FRAMES (MEMORY_SIZE / PAGE_SIZE)  /* 1024/64 = 16 marcos   */
-#define MAX_PAGES    16          /* máximo de páginas por proceso          */
-#define MAX_PROCESS  10          /* máximo de procesos en tabla de páginas */
+#define NPART 8
+static const int PART_SZ[NPART] = {64,64,128,128,128,160,160,192};
 
-/* ============================================================
-   ESTRUCTURAS — PARTICIONAMIENTO DINÁMICO
-   ============================================================ */
-typedef struct
+#define PAGE_SZ 64
+#define NFRAMES (MEM_SIZE / PAGE_SZ)
+#define MAX_PROC 16
+#define MAX_PAGES 32
+
+#define SEG_MAX_PROC 16
+#define SEG_MAX_SEG  8
+#define SEG_LOG_SZ   1024
+
+/* ---- Dynamic blocks ---- */
+typedef struct { int pid, size; bool used; } DBlock;
+static DBlock dmem[MAX_BLK];
+static int dcnt;
+
+/* ---- Static partitions ---- */
+typedef struct { int pid, size; bool used; } Part;
+static Part spart[NPART];
+
+/* ---- Paging ---- */
+typedef struct { int pid, np, bytes; int pt[MAX_PAGES]; } PProc;
+static bool frames[NFRAMES];
+static PProc pproc[MAX_PROC];
+static int pcnt;
+
+/* ---- Segmentation ---- */
+typedef struct { int base, lim; bool used; } Seg;
+typedef struct { int pid; Seg s[SEG_MAX_SEG]; } SProc;
+static SProc sproc[SEG_MAX_PROC];
+static int scnt;
+
+/* ---- IO helpers ---- */
+static void flush_in(void)
 {
-    int  process_id;
-    int  size;
-    bool occupied;
-} Block;
-
-Block memory[MAX_BLOCKS];
-int   block_count = 0;
-
-/* ============================================================
-   ESTRUCTURAS — PAGINACIÓN
-   ============================================================ */
-
-/* Tabla de páginas de UN proceso */
-typedef struct
-{
-    int  process_id;
-    int  page_count;                /* cuántas páginas usa este proceso  */
-    int  page_table[MAX_PAGES];     /* page_table[i] = número de marco   */
-} PageTableEntry;
-
-bool            frames[TOTAL_FRAMES];       /* true = ocupado            */
-PageTableEntry  page_processes[MAX_PROCESS];
-int             page_process_count = 0;
-
-
-/* ============================================================
-   ==================  PARTICIONAMIENTO DINÁMICO  =============
-   ============================================================ */
-
-void initialize_memory()
-{
-    memory[0].process_id = -1;
-    memory[0].size       = MEMORY_SIZE;
-    memory[0].occupied   = false;
-    block_count          = 1;
+    int c;
+    do { c = getchar(); } while (c != '\n' && c != EOF);
 }
 
-void print_memory()
+static int rd(const char *p)
 {
-    printf("\n======= ESTADO DE MEMORIA (Dinámico) =======\n");
-    for (int i = 0; i < block_count; i++)
-    {
-        if (memory[i].occupied)
-            printf("  Bloque %d: Proceso %d  (%d bytes)\n",
-                   i, memory[i].process_id, memory[i].size);
-        else
-            printf("  Bloque %d: LIBRE       (%d bytes)\n",
-                   i, memory[i].size);
+    int x;
+    printf("%s", p);
+    if (scanf("%d", &x) != 1) {
+        printf("Entrada inválida.\n");
+        flush_in();
+        return 0;
     }
-    printf("=============================================\n");
+    return x;
 }
 
-void merge_free_blocks()
+/* ===================== Dynamic partitioning ===================== */
+static void dinit(void)
 {
-    for (int i = 0; i < block_count - 1; i++)
-    {
-        if (!memory[i].occupied && !memory[i + 1].occupied)
-        {
-            memory[i].size += memory[i + 1].size;
-            for (int k = i + 1; k < block_count - 1; k++)
-                memory[k] = memory[k + 1];
-            block_count--;
+    dmem[0].pid = -1;
+    dmem[0].size = MEM_SIZE;
+    dmem[0].used = false;
+    dcnt = 1;
+}
+
+static void dprint(void)
+{
+    int i;
+    puts("\n-- Dinámico --");
+    for (i = 0; i < dcnt; i++)
+        printf("Bloque %2d: %s (%d bytes)\n", i, dmem[i].used ? "OCUP" : "LIBRE", dmem[i].size);
+}
+
+static void dmerge(void)
+{
+    int i, k;
+    for (i = 0; i < dcnt - 1; i++) {
+        if (!dmem[i].used && !dmem[i + 1].used) {
+            dmem[i].size += dmem[i + 1].size;
+            for (k = i + 1; k < dcnt - 1; k++) dmem[k] = dmem[k + 1];
+            dcnt--;
             i--;
         }
     }
 }
 
-void split_block(int index, int size)
+static void dsplit(int idx, int sz)
 {
-    int remaining = memory[index].size - size;
-    memory[index].size = size;
+    int rem, j;
+    rem = dmem[idx].size - sz;
+    dmem[idx].size = sz;
 
-    if (remaining > 0 && block_count < MAX_BLOCKS)
-    {
-        for (int j = block_count; j > index + 1; j--)
-            memory[j] = memory[j - 1];
-
-        memory[index + 1].process_id = -1;
-        memory[index + 1].size       = remaining;
-        memory[index + 1].occupied   = false;
-        block_count++;
+    if (rem > 0) {
+        if (dcnt >= MAX_BLK) { dmem[idx].size += rem; return; }
+        for (j = dcnt; j > idx + 1; j--) dmem[j] = dmem[j - 1];
+        dmem[idx + 1].pid = -1; dmem[idx + 1].size = rem; dmem[idx + 1].used = false;
+        dcnt++;
     }
 }
 
-void allocate_best_fit(int pid, int size)
+static void dalloc(int pid, int sz, int best)
 {
-    int best_index = -1;
-    int min_diff   = MEMORY_SIZE + 1;
+    int i, pick, score;
+    pick = -1;
+    score = best ? (MEM_SIZE + 1) : -1;
 
-    for (int i = 0; i < block_count; i++)
-    {
-        if (!memory[i].occupied && memory[i].size >= size)
-        {
-            int diff = memory[i].size - size;
-            if (diff < min_diff) { min_diff = diff; best_index = i; }
+    if (sz <= 0) { puts("Tamaño inválido."); return; }
+
+    for (i = 0; i < dcnt; i++) if (!dmem[i].used && dmem[i].size >= sz) {
+        int diff = dmem[i].size - sz;
+        if ((best && diff < score) || (!best && dmem[i].size > score)) {
+            score = best ? diff : dmem[i].size;
+            pick = i;
         }
     }
 
-    if (best_index == -1)
-    {
-        printf("BEST FIT: Sin espacio para proceso %d (%d bytes).\n", pid, size);
+    if (pick < 0) { printf("%s FIT (dinámico): sin espacio.\n", best ? "BEST" : "WORST"); return; }
+
+    dsplit(pick, sz);
+    dmem[pick].pid = pid;
+    dmem[pick].used = true;
+    printf("%s FIT (dinámico): pid=%d asignado %d bytes.\n", best ? "BEST" : "WORST", pid, sz);
+}
+
+static void dfreep(int pid)
+{
+    int i;
+    for (i = 0; i < dcnt; i++) if (dmem[i].used && dmem[i].pid == pid) {
+        dmem[i].used = false;
+        dmem[i].pid = -1;
+        dmerge();
+        printf("Dinámico: pid=%d liberado.\n", pid);
         return;
     }
-
-    split_block(best_index, size);
-    memory[best_index].process_id = pid;
-    memory[best_index].occupied   = true;
-    printf("BEST FIT: Proceso %d → bloque %d (%d bytes).\n", pid, best_index, size);
+    puts("Dinámico: pid no encontrado.");
 }
 
-void allocate_worst_fit(int pid, int size)
+/* ===================== Static partitioning ===================== */
+static void sinit(void)
 {
-    int worst_index = -1;
-    int max_size    = -1;
+    int i;
+    for (i = 0; i < NPART; i++) { spart[i].pid = -1; spart[i].size = PART_SZ[i]; spart[i].used = false; }
+}
 
-    for (int i = 0; i < block_count; i++)
-    {
-        if (!memory[i].occupied && memory[i].size >= size)
-        {
-            if (memory[i].size > max_size) { max_size = memory[i].size; worst_index = i; }
+static void sprint(void)
+{
+    int i;
+    puts("\n-- Estático (particiones fijas) --");
+    for (i = 0; i < NPART; i++)
+        printf("Part %2d: %s (%d bytes)\n", i, spart[i].used ? "OCUP" : "LIBRE", spart[i].size);
+}
+
+static void salloc(int pid, int sz, int best)
+{
+    int i, pick, score;
+    pick = -1;
+    score = best ? (MEM_SIZE + 1) : -1;
+
+    if (sz <= 0) { puts("Tamaño inválido."); return; }
+
+    for (i = 0; i < NPART; i++) if (!spart[i].used && spart[i].size >= sz) {
+        int diff = spart[i].size - sz;
+        if ((best && diff < score) || (!best && spart[i].size > score)) {
+            score = best ? diff : spart[i].size;
+            pick = i;
         }
     }
 
-    if (worst_index == -1)
-    {
-        printf("WORST FIT: Sin espacio para proceso %d (%d bytes).\n", pid, size);
+    if (pick < 0) { printf("%s FIT (estático): no hay partición.\n", best ? "BEST" : "WORST"); return; }
+
+    spart[pick].used = true;
+    spart[pick].pid = pid;
+    printf("%s FIT (estático): pid=%d -> part=%d (part=%d, frag_int=%d)\n",
+           best ? "BEST" : "WORST", pid, pick, spart[pick].size, spart[pick].size - sz);
+}
+
+static void sfreep(int pid)
+{
+    int i;
+    for (i = 0; i < NPART; i++) if (spart[i].used && spart[i].pid == pid) {
+        spart[i].used = false;
+        spart[i].pid = -1;
+        printf("Estático: pid=%d liberado.\n", pid);
         return;
     }
-
-    split_block(worst_index, size);
-    memory[worst_index].process_id = pid;
-    memory[worst_index].occupied   = true;
-    printf("WORST FIT: Proceso %d → bloque %d (%d bytes).\n", pid, worst_index, size);
+    puts("Estático: pid no encontrado.");
 }
 
-void free_memory(int pid)
+/* ===================== Paging ===================== */
+static void pinit(void)
 {
-    for (int i = 0; i < block_count; i++)
-    {
-        if (memory[i].occupied && memory[i].process_id == pid)
-        {
-            printf("Liberando proceso %d del bloque %d.\n", pid, i);
-            memory[i].process_id = -1;
-            memory[i].occupied   = false;
-            merge_free_blocks();
-            return;
-        }
+    int i;
+    for (i = 0; i < NFRAMES; i++) frames[i] = false;
+    pcnt = 0;
+    puts("Paginación inicializada.");
+}
+
+static void pframes(void)
+{
+    int i;
+    puts("\n-- Marcos --");
+    for (i = 0; i < NFRAMES; i++) printf("Frame %2d: %s\n", i, frames[i] ? "OCUP" : "libre");
+}
+
+static void ptables(void)
+{
+    int i, p;
+    puts("\n-- Tablas de páginas --");
+    if (pcnt == 0) puts("(sin procesos)");
+    for (i = 0; i < pcnt; i++) {
+        printf("pid=%d np=%d bytes=%d frag_int=%d\n",
+               pproc[i].pid, pproc[i].np, pproc[i].bytes, pproc[i].np * PAGE_SZ - pproc[i].bytes);
+        for (p = 0; p < pproc[i].np; p++) printf("  pág %2d -> frame %2d\n", p, pproc[i].pt[p]);
     }
-    printf("Error: proceso %d no encontrado.\n", pid);
-}
-/* ============================================================
-   ========================  PAGINACIÓN  ======================
-   ============================================================ */
-
-/* Inicializa todos los marcos como libres */
-void initialize_paging()
-{
-    for (int i = 0; i < TOTAL_FRAMES; i++)
-        frames[i] = false;
-    page_process_count = 0;
-    printf("Paginación inicializada: %d marcos de %d bytes cada uno.\n",
-           TOTAL_FRAMES, PAGE_SIZE);
 }
 
-/* Muestra el estado de cada marco físico */
-void print_frames()
+static void palloc(int pid, int bytes)
 {
-    printf("\n======= ESTADO DE MARCOS (Paginación) =======\n");
-    printf("  Tamaño de página/marco: %d bytes\n", PAGE_SIZE);
-    printf("  Marcos totales: %d\n\n", TOTAL_FRAMES);
+    int np, freec, i, as;
+    PProc *e;
 
-    for (int i = 0; i < TOTAL_FRAMES; i++)
-    {
-        if (frames[i])
-            printf("  Marco %2d: OCUPADO\n", i);
-        else
-            printf("  Marco %2d: libre\n", i);
-    }
-    printf("=============================================\n");
+    if (bytes <= 0) { puts("Tamaño inválido."); return; }
+
+    np = (bytes + PAGE_SZ - 1) / PAGE_SZ;
+    if (pcnt >= MAX_PROC) { puts("Paginación: límite de procesos."); return; }
+    if (np > MAX_PAGES) { puts("Paginación: excede MAX_PAGES."); return; }
+
+    freec = 0;
+    for (i = 0; i < NFRAMES; i++) if (!frames[i]) freec++;
+    if (freec < np) { puts("Paginación: no hay marcos suficientes."); return; }
+
+    e = &pproc[pcnt];
+    e->pid = pid; e->np = np; e->bytes = bytes;
+
+    as = 0;
+    for (i = 0; i < NFRAMES && as < np; i++) if (!frames[i]) { frames[i] = true; e->pt[as++] = i; }
+
+    pcnt++;
+    printf("Paginación: pid=%d asignado %d bytes -> %d pág (frag_int=%d)\n",
+           pid, bytes, np, np * PAGE_SZ - bytes);
 }
 
-/* Muestra la tabla de páginas de todos los procesos */
-void print_page_tables()
+static void pfreep(int pid)
 {
-    printf("\n======= TABLAS DE PÁGINAS =======\n");
-    if (page_process_count == 0)
-    {
-        printf("  (sin procesos paginados)\n");
-    }
-    for (int i = 0; i < page_process_count; i++)
-    {
-        printf("  Proceso %d (%d páginas):\n",
-               page_processes[i].process_id,
-               page_processes[i].page_count);
-
-        for (int p = 0; p < page_processes[i].page_count; p++)
-            printf("    Página %d → Marco %d  (dir. física: %d)\n",
-                   p,
-                   page_processes[i].page_table[p],
-                   page_processes[i].page_table[p] * PAGE_SIZE);
-    }
-    printf("=================================\n");
-}
-
-/* Asigna páginas a un proceso según su tamaño */
-void allocate_pages(int pid, int size)
-{
-    /* calcular cuántas páginas necesita (redondeo hacia arriba) */
-    int pages_needed = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-
-    if (page_process_count >= MAX_PROCESS)
-    {
-        printf("PAGINACIÓN: Límite de procesos alcanzado.\n");
+    int i, p, k;
+    for (i = 0; i < pcnt; i++) if (pproc[i].pid == pid) {
+        for (p = 0; p < pproc[i].np; p++) frames[pproc[i].pt[p]] = false;
+        for (k = i; k < pcnt - 1; k++) pproc[k] = pproc[k + 1];
+        pcnt--;
+        printf("Paginación: pid=%d liberado.\n", pid);
         return;
     }
+    puts("Paginación: pid no encontrado.");
+}
 
-    if (pages_needed > MAX_PAGES)
-    {
-        printf("PAGINACIÓN: Proceso %d necesita %d páginas, supera MAX_PAGES=%d.\n",
-               pid, pages_needed, MAX_PAGES);
+static void ptrans(int pid, int la)
+{
+    int i, pg, off;
+    pg = la / PAGE_SZ; off = la % PAGE_SZ;
+
+    for (i = 0; i < pcnt; i++) if (pproc[i].pid == pid) {
+        if (la < 0 || pg >= pproc[i].np) { puts("Traducción: fuera de rango."); return; }
+        printf("pid=%d L=%d -> pág=%d off=%d -> frame=%d -> F=%d\n",
+               pid, la, pg, off, pproc[i].pt[pg], pproc[i].pt[pg] * PAGE_SZ + off);
         return;
     }
-
-    /* contar marcos libres disponibles */
-    int free_frames = 0;
-    for (int i = 0; i < TOTAL_FRAMES; i++)
-        if (!frames[i]) free_frames++;
-
-    if (free_frames < pages_needed)
-    {
-        printf("PAGINACIÓN: Sin marcos suficientes para proceso %d "
-               "(necesita %d, hay %d libres).\n",
-               pid, pages_needed, free_frames);
-        return;
-    }
-
-    /* registrar proceso en la tabla */
-    PageTableEntry *entry = &page_processes[page_process_count];
-    entry->process_id = pid;
-    entry->page_count = pages_needed;
-
-    /* asignar marcos libres uno a uno */
-    int assigned = 0;
-    for (int i = 0; i < TOTAL_FRAMES && assigned < pages_needed; i++)
-    {
-        if (!frames[i])
-        {
-            frames[i]                  = true;
-            entry->page_table[assigned] = i;
-            assigned++;
-        }
-    }
-
-    page_process_count++;
-
-    int wasted = (pages_needed * PAGE_SIZE) - size;  /* fragmentación interna */
-    printf("PAGINACIÓN: Proceso %d asignado → %d página(s), "
-           "%d bytes usados, %d bytes desperdiciados (frag. interna).\n",
-           pid, pages_needed, size, wasted);
+    puts("Traducción: pid no encontrado.");
 }
 
-/* Libera todos los marcos de un proceso paginado */
-void free_pages(int pid)
+/* ===================== Segmentation (bonus) ===================== */
+static void sgm_init(void) { scnt = 0; puts("Segmentación inicializada."); }
+
+static SProc *sgm_find(int pid)
 {
-    for (int i = 0; i < page_process_count; i++)
-    {
-        if (page_processes[i].process_id == pid)
-        {
-            printf("PAGINACIÓN: Liberando proceso %d (%d marcos).\n",
-                   pid, page_processes[i].page_count);
-
-            /* liberar cada marco */
-            for (int p = 0; p < page_processes[i].page_count; p++)
-                frames[page_processes[i].page_table[p]] = false;
-
-            /* eliminar entrada de la tabla compactando */
-            for (int k = i; k < page_process_count - 1; k++)
-                page_processes[k] = page_processes[k + 1];
-
-            page_process_count--;
-            return;
-        }
-    }
-    printf("PAGINACIÓN: Proceso %d no encontrado.\n", pid);
+    int i;
+    for (i = 0; i < scnt; i++) if (sproc[i].pid == pid) return &sproc[i];
+    return NULL;
 }
 
-/* Traduce dirección lógica → dirección física */
-void translate_address(int pid, int logical_address)
+static SProc *sgm_get(int pid)
 {
-    int page   = logical_address / PAGE_SIZE;   /* número de página  */
-    int offset = logical_address % PAGE_SIZE;   /* desplazamiento    */
+    int i;
+    SProc *p = sgm_find(pid);
+    if (p) return p;
+    if (scnt >= SEG_MAX_PROC) return NULL;
 
-    for (int i = 0; i < page_process_count; i++)
-    {
-        if (page_processes[i].process_id == pid)
-        {
-            if (page >= page_processes[i].page_count)
-            {
-                printf("TRADUCCIÓN: Dirección lógica %d fuera de rango "
-                       "(proceso %d tiene %d páginas).\n",
-                       logical_address, pid, page_processes[i].page_count);
-                return;
-            }
-            int frame    = page_processes[i].page_table[page];
-            int physical = frame * PAGE_SIZE + offset;
-            printf("TRADUCCIÓN: Proceso %d | Dir. lógica %d → "
-                   "Página %d + Offset %d → Marco %d → Dir. física %d\n",
-                   pid, logical_address, page, offset, frame, physical);
-            return;
-        }
-    }
-    printf("TRADUCCIÓN: Proceso %d no encontrado.\n", pid);
+    sproc[scnt].pid = pid;
+    for (i = 0; i < SEG_MAX_SEG; i++) { sproc[scnt].s[i].used = false; sproc[scnt].s[i].base = 0; sproc[scnt].s[i].lim = 0; }
+    scnt++;
+    return &sproc[scnt - 1];
 }
 
-/* ============================================================
-   MAIN
-   ============================================================ */
-int main()
+static void sgm_make(int pid, int sid, int sz)
 {
-    /* -------- PARTICIONAMIENTO DINÁMICO -------- */
-    printf("====== SIMULADOR DE PARTICIONAMIENTO DINAMICO ======\n");
-    printf("Memoria total: %d bytes | Max bloques: %d\n\n", MEMORY_SIZE, MAX_BLOCKS);
+    SProc *p;
+    int i, end;
 
-    printf("===== PRUEBA: BEST FIT =====\n");
-    initialize_memory();
-    print_memory();
+    if (sz <= 0 || sid < 0 || sid >= SEG_MAX_SEG) { puts("Segmentación: datos inválidos."); return; }
+    p = sgm_get(pid); if (!p) { puts("Segmentación: límite de procesos."); return; }
 
-    printf("\nAsignando procesos...\n");
-    allocate_best_fit(101, 200);
-    allocate_best_fit(102, 150);
-    allocate_best_fit(103, 250);
-    print_memory();
+    end = 0;
+    for (i = 0; i < SEG_MAX_SEG; i++) if (p->s[i].used) {
+        int e = p->s[i].base + p->s[i].lim;
+        if (e > end) end = e;
+    }
+    if (end + sz > SEG_LOG_SZ) { puts("Segmentación: sin espacio lógico."); return; }
 
-    printf("\nLiberando proceso 102...\n");
-    free_memory(102);
-    allocate_best_fit(104, 100);
-    print_memory();
+    p->s[sid].base = end; p->s[sid].lim = sz; p->s[sid].used = true;
+    printf("Segmentación: pid=%d seg=%d base=%d lim=%d\n", pid, sid, p->s[sid].base, p->s[sid].lim);
+}
 
-    printf("\n===== PRUEBA: WORST FIT =====\n");
-    initialize_memory();
-    allocate_worst_fit(201, 200);
-    allocate_worst_fit(202, 150);
-    allocate_worst_fit(203, 250);
-    print_memory();
+static void sgm_trans(int pid, int sid, int off)
+{
+    SProc *p = sgm_find(pid);
+    if (!p) { puts("Segmentación: pid no encontrado."); return; }
+    if (sid < 0 || sid >= SEG_MAX_SEG || !p->s[sid].used) { puts("Segmentación: segmento inexistente."); return; }
+    if (off < 0 || off >= p->s[sid].lim) { puts("Segmentación: violación de límite."); return; }
+    printf("pid=%d (seg=%d,off=%d) -> dir=%d\n", pid, sid, off, p->s[sid].base + off);
+}
 
-    printf("\nLiberando proceso 202...\n");
-    free_memory(202);
-    allocate_worst_fit(204, 100);
-    print_memory();
+static void sgm_print(void)
+{
+    int i, s;
+    puts("\n-- Tablas de segmentos --");
+    if (scnt == 0) puts("(sin procesos)");
+    for (i = 0; i < scnt; i++) {
+        printf("pid=%d\n", sproc[i].pid);
+        for (s = 0; s < SEG_MAX_SEG; s++) if (sproc[i].s[s].used)
+            printf("  seg %d: base=%d lim=%d\n", s, sproc[i].s[s].base, sproc[i].s[s].lim);
+    }
+}
 
-    /* -------- PAGINACIÓN -------- */
-    printf("\n\n====== SIMULADOR DE PAGINACIÓN ======\n");
-    printf("Tamaño de página: %d bytes | Marcos totales: %d\n\n",
-           PAGE_SIZE, TOTAL_FRAMES);
+/* ===================== Menus ===================== */
+static void menu_static(void)
+{
+    int op, pid, sz;
+    sinit();
+    for (;;) {
+        puts("\n[ESTÁTICO] 1 BestFit alloc | 2 WorstFit alloc | 3 free(pid) | 4 print | 0 back");
+        op = rd("Opción: "); if (op == 0) return;
+        if (op == 1 || op == 2) { pid = rd("pid: "); sz = rd("bytes: "); salloc(pid, sz, op == 1); }
+        else if (op == 3) { pid = rd("pid: "); sfreep(pid); }
+        else if (op == 4) sprint();
+        else puts("Inválida.");
+    }
+}
 
-    initialize_paging();
-    print_frames();
+static void menu_dynamic(void)
+{
+    int op, pid, sz;
+    dinit();
+    for (;;) {
+        puts("\n[DINÁMICO] 1 BestFit alloc | 2 WorstFit alloc | 3 free(pid) | 4 print | 0 back");
+        op = rd("Opción: "); if (op == 0) return;
+        if (op == 1 || op == 2) { pid = rd("pid: "); sz = rd("bytes: "); dalloc(pid, sz, op == 1); }
+        else if (op == 3) { pid = rd("pid: "); dfreep(pid); }
+        else if (op == 4) dprint();
+        else puts("Inválida.");
+    }
+}
 
-    printf("\n1. Asignando procesos paginados...\n");
-    allocate_pages(301, 100);   /* necesita 2 páginas  (100/64 → ceil = 2) */
-    allocate_pages(302, 200);   /* necesita 4 páginas  (200/64 → ceil = 4) */
-    allocate_pages(303, 64);    /* necesita 1 página exacta                */
+static void menu_paging(void)
+{
+    int op, pid, bytes, la;
+    pinit();
+    for (;;) {
+        puts("\n[PAGING] 1 alloc(pid,bytes) | 2 free(pid) | 3 frames | 4 tables | 5 translate | 0 back");
+        op = rd("Opción: "); if (op == 0) return;
+        if (op == 1) { pid = rd("pid: "); bytes = rd("bytes: "); palloc(pid, bytes); }
+        else if (op == 2) { pid = rd("pid: "); pfreep(pid); }
+        else if (op == 3) pframes();
+        else if (op == 4) ptables();
+        else if (op == 5) { pid = rd("pid: "); la = rd("dir lógica: "); ptrans(pid, la); }
+        else puts("Inválida.");
+    }
+}
 
-    print_frames();
-    print_page_tables();
+static void menu_seg(void)
+{
+    int op, pid, sid, sz, off;
+    sgm_init();
+    for (;;) {
+        puts("\n[SEG] 1 create(pid,seg,size) | 2 translate(pid,seg,off) | 3 print | 0 back");
+        op = rd("Opción: "); if (op == 0) return;
+        if (op == 1) { pid = rd("pid: "); sid = rd("seg(0..7): "); sz = rd("size: "); sgm_make(pid, sid, sz); }
+        else if (op == 2) { pid = rd("pid: "); sid = rd("seg: "); off = rd("off: "); sgm_trans(pid, sid, off); }
+        else if (op == 3) sgm_print();
+        else puts("Inválida.");
+    }
+}
 
-    printf("\n2. Traducción de direcciones lógicas...\n");
-    translate_address(301, 0);    /* página 0, offset 0  */
-    translate_address(301, 70);   /* página 1, offset 6  */
-    translate_address(302, 130);  /* página 2, offset 2  */
-
-    printf("\n3. Liberando proceso 302...\n");
-    free_pages(302);
-    print_frames();
-    print_page_tables();
-
-    printf("\n4. Asignando nuevo proceso en marcos liberados...\n");
-    allocate_pages(304, 180);
-    print_frames();
-    print_page_tables();
-
+int main(void)
+{
+    int op;
+    printf("SIMULADOR MEMORIA | MEM=%d | PAGE=%d | FRAMES=%d\n", MEM_SIZE, PAGE_SZ, NFRAMES);
+    for (;;) {
+        puts("\nMENÚ: 1 Estático | 2 Dinámico | 3 Paginación | 4 Segmentación(bonus) | 0 Salir");
+        op = rd("Opción: "); if (op == 0) break;
+        if (op == 1) menu_static();
+        else if (op == 2) menu_dynamic();
+        else if (op == 3) menu_paging();
+        else if (op == 4) menu_seg();
+        else puts("Inválida.");
+    }
     return 0;
 }
