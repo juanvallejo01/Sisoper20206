@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
+#define DEMO_DEADLOCK 1   // 1 = provoca interbloqueo, 0 = corre normal
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -108,7 +109,14 @@ int main(void) {
 
             mem->resultado_mul = r;
             resultados[idx++] = r;
+
+#if DEMO_DEADLOCK
+            // DEADLOCK DEMO:
+            // En modo deadlock NO avisamos al padre que ya terminamos la multiplicación.
+            // El padre (abajo) se queda esperando mem->mul_listo == 1 para siempre.
+#else
             mem->mul_listo = 1;
+#endif
 
             printf("[Cons1-MUL] a=%d b=%d => %d\n", a, b, r);
             fflush(stdout);
@@ -187,6 +195,14 @@ int main(void) {
 
         printf("[Padre] Publicado: a=%d b=%d\n", a, b);
         fflush(stdout);
+
+#if DEMO_DEADLOCK
+        // DEADLOCK DEMO:
+        // El padre se queda esperando mul_listo, pero Cons1 (arriba) nunca lo pone en 1.
+        printf("[DEADLOCK] Padre esperando mul_listo... (se va a quedar bloqueado)\n");
+        fflush(stdout);
+        while (mem->mul_listo == 0) usleep(1000);
+#endif
 
         // esperar que ambos terminen
         while (mem->mul_listo == 0 || mem->sum_listo == 0) usleep(1000);
