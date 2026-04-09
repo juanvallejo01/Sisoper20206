@@ -1,5 +1,65 @@
+/*
+ * nanomain.c — Laboratorio IPC: FIFO + Memoria Compartida
+ * Universidad Santiago de Cali, Sistemas Operativos 2026A
+ *
+ * ─── MODO DEADLOCK ──────────────────────────────────────────────────────────
+ *   #define DEMO_DEADLOCK 1   → activa el interbloqueo demostrativo
+ *   #define DEMO_DEADLOCK 0   → ejecución normal (programa termina correctamente)
+ *
+ * ─── DESCRIPCIÓN DEL INTERBLOQUEO ──────────────────────────────────────────
+ *   Se produce una ESPERA CIRCULAR entre el proceso Padre y el Consumidor 1:
+ *
+ *   • Padre     : espera que  mem->mul_listo == 1
+ *                 (espera que Cons1 indique que terminó de multiplicar)
+ *                 pero NUNCA pone mem->listo = 1 primero, por lo que
+ *                 Cons1 nunca recibe la señal de inicio.
+ *
+ *   • Cons1-MUL : espera que  mem->listo == 1
+ *                 (espera que el Padre publique un par)
+ *                 pero el Padre no publica porque espera a Cons1.
+ *
+ *   Condición de espera circular:
+ *       Padre → necesita mul_listo  (que sólo Cons1 puede cambiar)
+ *       Cons1 → necesita listo      (que sólo el Padre puede cambiar)
+ *       ⇒ ninguno avanza → DEADLOCK
+ *
+ *   Punto exacto de bloqueo:
+ *       Padre : línea marcada [DEADLOCK-PADRE] — before while(mul_listo==0)
+ *       Cons1 : línea marcada [DEADLOCK-CONS1] — in while(listo==0)
+ *       Cons2 : queda bloqueado igual que Cons1 esperando listo.
+ *       Prod  : se desbloquea cuando el padre abre el FIFO (esto sí ocurre),
+ *               envía el primer par al FIFO y luego bloquea en sleep(1).
+ *
+ * ─── COMANDOS ───────────────────────────────────────────────────────────────
+ *   # Limpiar recursos residuales:
+ *   rm -f canal_fifo
+ *   ipcs -m | awk '/0x1234/{print $2}' | xargs -r ipcrm -m
+ *
+ *   # Compilar:
+ *   gcc -Wall -Wextra -std=c11 nanomain.c -o lab_ipc
+ *
+ *   # Ejecutar en modo DEADLOCK (queda colgado):
+ *   ./lab_ipc          (con DEMO_DEADLOCK 1)
+ *   # Verificar que sigue corriendo:
+ *   ps -ef | grep lab_ipc
+ *   # Detener:
+ *   kill $(pgrep lab_ipc)
+ *
+ *   # Ejecutar en modo NORMAL (termina e imprime resultados):
+ *   # Cambiar DEMO_DEADLOCK a 0, recompilar y ejecutar.
+ *   ./lab_ipc
+ * ────────────────────────────────────────────────────────────────────────────
+ */
+
+/*
+ * Cambia a 0 para ejecutar el programa en modo normal.
+ * Cambia a 1 para demostrar el interbloqueo.
+ */
+#define DEMO_DEADLOCK 1
+
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
+#define _DEFAULT_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,6 +160,9 @@ int main(void) {
         int idx = 0;
 
         while (1) {
+            /* [DEADLOCK-CONS1] Cons1 queda bloqueado aquí cuando DEMO_DEADLOCK=1:
+             * listo nunca se pondrá en 1 porque el Padre está esperando
+             * mul_listo, que sólo este proceso puede cambiar. */
             while (mem->listo == 0 && mem->fin == 0) usleep(1000);
             if (mem->fin) break;
 
@@ -176,8 +239,33 @@ int main(void) {
         int a, b;
         if (sscanf(line, "%d %d", &a, &b) != 2) continue;
 
+        /* ── MODO NORMAL ──────────────────────────────────────────────────────
+         * El padre espera que el par anterior haya sido consumido por ambos
+         * consumidores (listo baja a 0) y luego publica el nuevo par.
+         * ─────────────────────────────────────────────────────────────────── */
+
         // esperar que el par anterior esté consumido
         while (mem->listo == 1) usleep(1000);
+
+#if DEMO_DEADLOCK
+        /* ── MODO DEADLOCK ────────────────────────────────────────────────────
+         * [DEADLOCK-PADRE] El Padre espera que mul_listo sea 1 ANTES de
+         * publicar el par (es decir, antes de poner listo=1).
+         *
+         * Espera circular:
+         *   → Padre bloquea aquí esperando  mem->mul_listo == 1
+         *   → Cons1  bloquea en su bucle    mem->listo     == 0  [DEADLOCK-CONS1]
+         *
+         * Ninguno de los dos puede avanzar:
+         *   • Cons1 sólo pondrá mul_listo=1 cuando vea listo=1.
+         *   • El Padre sólo pondrá listo=1  cuando vea mul_listo=1.
+         *   ⇒ INTERBLOQUEO (espera circular indefinida).
+         * ─────────────────────────────────────────────────────────────────── */
+        printf("[DEADLOCK] Padre: bloqueado esperando mul_listo "
+               "(Cons1 nunca lo verá porque listo sigue en 0)...\n");
+        fflush(stdout);
+        while (mem->mul_listo == 0) usleep(1000); /* ← Padre queda bloqueado aquí */
+#endif
 
         mem->a = a;
         mem->b = b;

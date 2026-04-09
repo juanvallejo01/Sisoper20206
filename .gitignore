@@ -1,0 +1,8 @@
+# Compiled binaries
+lab_ipc
+nanomain
+memory
+*.out
+
+# FIFO residual
+canal_fifo
