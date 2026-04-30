@@ -1,0 +1,5 @@
+HELLO WORD
+
+--- ESTADÍSTICAS ---
+Total de líneas: 1
+Total de palabras: 2
