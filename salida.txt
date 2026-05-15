@@ -1,5 +1,6 @@
-HELLO WORD
+HELLO WORD MY NAME IS JUAN 
+
 
 --- ESTADÍSTICAS ---
 Total de líneas: 1
-Total de palabras: 2
+Total de palabras: 6
